@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>基于 ACO 算法的蚁群信息素寻路模拟 (Ant Colony Optimization)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #111827; overflow: hidden; touch-action: none; font-family: ui-sans-serif, system-ui, sans-serif; }
+        #canvas-container { position: absolute; inset: 0; z-index: 1; display: flex; justify-content: center; align-items: center; }
+        /* 离屏渲染信息素，主屏渲染蚂蚁 */
+        canvas { display: block; background-color: #1e293b; box-shadow: 0 0 20px rgba(0,0,0,0.5); border-radius: 8px; }
+        
+        #ui-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; padding: 15px; display: flex; flex-direction: column; justify-content: space-between; }
+        .panel { background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(4px); border: 1px solid #334155; border-radius: 10px; padding: 12px; pointer-events: auto; color: #e2e8f0; }
+        
+        @media (min-width: 768px) {
+            #ui-layer { flex-direction: row; }
+            .panel { width: 300px; height: fit-content; }
+        }
+        
+        .stat-val { font-family: monospace; font-weight: bold; color: #4ade80; }
+        input[type=range] { width: 100%; margin: 8px 0; accent-color: #3b82f6; }
+    </style>
+</head>
+<body>
+
+<div id="canvas-container">
+    <canvas id="simCanvas"></canvas>
+</div>
+
+<div id="ui-layer">
+    <div class="panel shadow-lg">
+        <h2 class="text-sm md:text-lg font-bold text-blue-400 mb-2 border-b border-gray-600 pb-1">蚁群生态数据监控</h2>
+        <div class="flex justify-between text-xs md:text-sm mb-1"><span>🐜 活跃工蚁总数:</span> <span id="stat-ants" class="stat-val">0</span></div>
+        <div class="flex justify-between text-xs md:text-sm mb-1"><span>🍃 已搬运食物:</span> <span id="stat-food" class="stat-val text-yellow-400">0</span></div>
+        <div class="flex justify-between text-xs md:text-sm mb-1"><span>⚡ 寻找食物比例:</span> <span id="stat-seeking" class="stat-val text-gray-400">0%</span></div>
+        <div class="flex justify-between text-xs md:text-sm mb-1 mt-2"><span>FPS:</span> <span id="stat-fps" class="stat-val text-pink-400">60</span></div>
+    </div>
+
+    <div class="panel shadow-lg mt-2 md:mt-0">
+        <h2 class="text-sm md:text-lg font-bold text-yellow-400 mb-2 border-b border-gray-600 pb-1">化学环境控制变量</h2>
+        
+        <div class="mb-3">
+            <div class="flex justify-between text-xs">
+                <span>信息素挥发率 (Evaporation)</span>
+                <span id="val-evap">1.5%</span>
+            </div>
+            <input type="range" id="slider-evap" min="0.1" max="5.0" step="0.1" value="1.5">
+            <p class="text-[10px] text-gray-400 leading-tight mt-1">控制信息素消失速度。挥发太慢会导致死循环，太快会导致断流。</p>
+        </div>
+
+        <div>
+            <div class="flex justify-between text-xs">
+                <span>随机探索噪声 (Wander Noise)</span>
+                <span id="val-noise">0.3</span>
+            </div>
+            <input type="range" id="slider-noise" min="0.0" max="1.0" step="0.1" value="0.3">
+            <p class="text-[10px] text-gray-400 leading-tight mt-1">生物学客观事实：适当的随机误差有助于蚁群发现更优的捷径。</p>
+        </div>
+
+        <button id="btn-add-food" class="mt-3 w-full bg-blue-600 hover:bg-blue-500 text-white text-xs py-2 rounded transition">
+            📍 在随机位置投放新食物源
+        </button>
+    </div>
+</div>
+
+<script>
+/**
+ * 严格基于数学向量与 ACO 算法的底层实现
+ */
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d', { alpha: false }); // 关闭 alpha 提升性能
+
+// 离屏 Canvas 用于处理和绘制高强度的信息素网格
+const trailCanvas = document.createElement('canvas');
+const trailCtx = trailCanvas.getContext('2d', { willReadFrequently: true });
+
+let width, height;
+let nestPos = { x: 0, y: 0 };
+let foods = [];
+let ants = [];
+
+// 模拟器客观参数
+const CONFIG = {
+    antCount: window.innerWidth < 768 ? 400 : 1000,
+    antSpeed: 1.5,
+    sensorDist: 15,    // 触角探测距离
+    sensorAngle: 0.6,  // 触角张角 (弧度)
+    sensorSize: 3,     // 采样点半径
+    depositAmount: 255,// 留下信息素的浓度
+    evaporationRate: 0.015, // 挥发率
+    wanderStrength: 0.3,
+    foodRadius: 20,
+    nestRadius: 30
+};
+
+// 统计数据
+let stats = { collectedFood: 0, fpsFrames: 0, lastFpsTime: performance.now() };
+
+// DOM 元素
+const uiEvap = document.getElementById('slider-evap');
+const valEvap = document.getElementById('val-evap');
+const uiNoise = document.getElementById('slider-noise');
+const valNoise = document.getElementById('val-noise');
+
+uiEvap.addEventListener('input', e => { CONFIG.evaporationRate = e.target.value / 100; valEvap.innerText = e.target.value + '%'; });
+uiNoise.addEventListener('input', e => { CONFIG.wanderStrength = parseFloat(e.target.value); valNoise.innerText = e.target.value; });
+document.getElementById('btn-add-food').addEventListener('click', spawnFood);
+
+function resize() {
+    width = Math.min(window.innerWidth * 0.95, 1000);
+    height = Math.min(window.innerHeight * 0.85, 800);
+    
+    // 适配移动端比例
+    if (window.innerWidth < 768) {
+        width = window.innerWidth;
+        height = window.innerHeight;
+    }
+    
+    canvas.width = width; canvas.height = height;
+    trailCanvas.width = width; trailCanvas.height = height;
+    
+    nestPos = { x: width / 2, y: height / 2 };
+    
+    // 填充黑色背景
+    trailCtx.fillStyle = '#000';
+    trailCtx.fillRect(0, 0, width, height);
+}
+
+function spawnFood() {
+    let margin = 50;
+    let angle = Math.random() * Math.PI * 2;
+    let distance = Math.min(width, height) / 2 * (0.5 + Math.random() * 0.4);
+    foods.push({
+        x: nestPos.x + Math.cos(angle) * distance,
+        y: nestPos.y + Math.sin(angle) * distance,
+        amount: 2000 // 食物容量
+    });
+}
+
+class Ant {
+    constructor() {
+        this.x = nestPos.x;
+        this.y = nestPos.y;
+        this.angle = Math.random() * Math.PI * 2;
+        this.hasFood = false;
+        this.color = '#94a3b8'; // 默认灰白色
+    }
+
+    // 触角采样客观函数：读取离屏画布像素的 G 通道(代表信息素)
+    sense(trailData, angleOffset) {
+        let sensorAngle = this.angle + angleOffset;
+        let sx = Math.floor(this.x + Math.cos(sensorAngle) * CONFIG.sensorDist);
+        let sy = Math.floor(this.y + Math.sin(sensorAngle) * CONFIG.sensorDist);
+
+        if (sx < 0 || sx >= width || sy < 0 || sy >= height) return 0;
+        
+        let index = (sy * width + sx) * 4;
+        // 使用 Green 通道作为信息素浓度标记
+        return trailData.data[index + 1]; 
+    }
+
+    update(trailData) {
+        // 1. 状态机：如果寻找食物
+        if (!this.hasFood) {
+            // 触角探测
+            let forward = this.sense(trailData, 0);
+            let left = this.sense(trailData, -CONFIG.sensorAngle);
+            let right = this.sense(trailData, CONFIG.sensorAngle);
+
+            // 基于化学浓度梯度的转向逻辑 (ACO核心)
+            if (forward > left && forward > right) {
+                this.angle += 0;
+            } else if (forward < left && forward < right) {
+                this.angle += (Math.random() > 0.5 ? 1 : -1) * CONFIG.wanderStrength;
+            } else if (left > right) {
+                this.angle -= CONFIG.wanderStrength;
+            } else if (right > left) {
+                this.angle += CONFIG.wanderStrength;
+            } else {
+                // 没有信息素时的随机布朗运动
+                this.angle += (Math.random() - 0.5) * CONFIG.wanderStrength * 2;
+            }
+
+            // 物理碰撞检测：是否到达食物
+            for (let i = 0; i < foods.length; i++) {
+                let f = foods[i];
+                let dx = this.x - f.x, dy = this.y - f.y;
+                if (dx*dx + dy*dy < CONFIG.foodRadius*CONFIG.foodRadius && f.amount > 0) {
+                    this.hasFood = true;
+                    this.angle += Math.PI; // 拿完食物原地180度转身
+                    f.amount--;
+                    this.color = '#fbbf24'; // 变黄色表示携带食物
+                    if (f.amount <= 0) foods.splice(i, 1);
+                    break;
+                }
+            }
+        } 
+        // 2. 状态机：如果携带食物返回 (基于死区推航，直接朝向巢穴)
+        else {
+            let dx = nestPos.x - this.x;
+            let dy = nestPos.y - this.y;
+            let targetAngle = Math.atan2(dy, dx);
+            
+            // 平滑转向巢穴
+            let angleDiff = targetAngle - this.angle;
+            // 处理角度突变
+            while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+            while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+            
+            this.angle += angleDiff * 0.1;
+
+            // 释放化学信息素 (只在离屏画布上绘制绿色发光点)
+            trailCtx.fillStyle = `rgba(0, 255, 0, 0.5)`;
+            trailCtx.fillRect(this.x, this.y, 2, 2);
+
+            // 物理碰撞检测：是否回到巢穴
+            if (dx*dx + dy*dy < CONFIG.nestRadius*CONFIG.nestRadius) {
+                this.hasFood = false;
+                this.angle += Math.PI;
+                this.color = '#94a3b8';
+                stats.collectedFood++;
+            }
+        }
+
+        // 边界反弹 (物理墙壁)
+        let nextX = this.x + Math.cos(this.angle) * CONFIG.antSpeed;
+        let nextY = this.y + Math.sin(this.angle) * CONFIG.antSpeed;
+        if (nextX < 5 || nextX > width - 5) { this.angle = Math.PI - this.angle; nextX = this.x; }
+        if (nextY < 5 || nextY > height - 5) { this.angle = -this.angle; nextY = this.y; }
+
+        this.x = nextX;
+        this.y = nextY;
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = this.color;
+        // 绘制微小拉长的身体以显示方向
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        ctx.fillRect(-2, -1, 4, 2);
+        ctx.restore();
+    }
+}
+
+function init() {
+    window.addEventListener('resize', () => { resize(); setup(); });
+    resize();
+    setup();
+    requestAnimationFrame(loop);
+}
+
+function setup() {
+    ants = [];
+    foods = [];
+    for (let i = 0; i < CONFIG.antCount; i++) ants.push(new Ant());
+    spawnFood(); // 初始生成一个食物
+}
+
+// 性能优化：每隔几帧才完全处理信息素挥发
+let tickCount = 0;
+
+function loop(timestamp) {
+    // 1. FPS 统计
+    stats.fpsFrames++;
+    if (timestamp - stats.lastFpsTime >= 1000) {
+        document.getElementById('stat-fps').innerText = stats.fpsFrames;
+        stats.fpsFrames = 0;
+        stats.lastFpsTime = timestamp;
+    }
+
+    // 2. 信息素挥发扩散阶段 (衰减 Trail Canvas)
+    trailCtx.fillStyle = `rgba(0, 0, 0, ${CONFIG.evaporationRate})`;
+    trailCtx.fillRect(0, 0, width, height);
+
+    // 获取当前信息素数据用于蚂蚁触角采样
+    let trailData = trailCtx.getImageData(0, 0, width, height);
+
+    // 3. 渲染主屏幕 (背景 + 巢穴 + 食物)
+    ctx.fillStyle = '#1e293b'; // 深蓝灰背景
+    ctx.fillRect(0, 0, width, height);
+    
+    // 将信息素图层混合绘制到主屏幕上 (加性混合形成发光效果)
+    ctx.globalCompositeOperation = 'lighten';
+    ctx.drawImage(trailCanvas, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+
+    // 绘制巢穴
+    let gradNest = ctx.createRadialGradient(nestPos.x, nestPos.y, 5, nestPos.x, nestPos.y, CONFIG.nestRadius);
+    gradNest.addColorStop(0, '#0f172a');
+    gradNest.addColorStop(1, '#334155');
+    ctx.fillStyle = gradNest;
+    ctx.beginPath(); ctx.arc(nestPos.x, nestPos.y, CONFIG.nestRadius, 0, Math.PI * 2); ctx.fill();
+
+    // 绘制食物源
+    ctx.fillStyle = '#10b981'; // 翡翠绿
+    for (let f of foods) {
+        let currentRadius = CONFIG.foodRadius * (f.amount / 2000);
+        ctx.beginPath(); ctx.arc(f.x, f.y, Math.max(5, currentRadius), 0, Math.PI * 2); ctx.fill();
+        // 叶子高光
+        ctx.fillStyle = '#6ee7b7';
+        ctx.beginPath(); ctx.arc(f.x - currentRadius*0.3, f.y - currentRadius*0.3, currentRadius*0.2, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#10b981';
+    }
+
+    // 4. 更新和绘制所有蚂蚁
+    let seekingCount = 0;
+    for (let ant of ants) {
+        ant.update(trailData);
+        ant.draw(ctx);
+        if (!ant.hasFood) seekingCount++;
+    }
+
+    // 更新 UI 面板
+    if (tickCount % 10 === 0) {
+        document.getElementById('stat-ants').innerText = CONFIG.antCount;
+        document.getElementById('stat-food').innerText = stats.collectedFood;
+        document.getElementById('stat-seeking').innerText = Math.round((seekingCount / CONFIG.antCount) * 100) + '%';
+    }
+    
+    tickCount++;
+    requestAnimationFrame(loop);
+}
+
+// 启动
+init();
+</script>
+</body>
+</html>
