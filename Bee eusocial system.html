@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>蜜蜂社会分工与热力学稳态模拟 (Honey Bee Eusociality)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #1a202c; overflow: hidden; touch-action: none; font-family: ui-sans-serif, system-ui, sans-serif; }
+        #canvas-container { position: absolute; inset: 0; z-index: 1; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; background-color: #2d3748; box-shadow: inset 0 0 50px rgba(0,0,0,0.5); }
+        
+        #ui-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; padding: 15px; display: flex; flex-direction: column; justify-content: space-between; }
+        .panel { background: rgba(26, 32, 44, 0.85); backdrop-filter: blur(8px); border: 1px solid #4a5568; border-radius: 12px; padding: 12px; pointer-events: auto; color: #e2e8f0; }
+        
+        @media (min-width: 768px) {
+            #ui-layer { flex-direction: row; }
+            .panel { width: 320px; height: fit-content; }
+        }
+        
+        .stat-val { font-family: monospace; font-weight: bold; }
+        input[type=range] { width: 100%; margin: 8px 0; accent-color: #ecc94b; }
+        
+        /* 蜂巢温度指示灯 */
+        .temp-indicator { transition: color 0.3s; }
+        .temp-hot { color: #fc8181; }
+        .temp-cold { color: #63b3ed; }
+        .temp-good { color: #68d391; }
+    </style>
+</head>
+<body>
+
+<div id="canvas-container">
+    <canvas id="simCanvas"></canvas>
+</div>
+
+<div id="ui-layer">
+    <div class="panel shadow-xl">
+        <h2 class="text-sm md:text-lg font-bold text-yellow-400 mb-2 border-b border-gray-600 pb-1">蜂巢社会学状态面板</h2>
+        
+        <!-- 热力学核心数据 -->
+        <div class="bg-gray-800 p-2 rounded mb-3 border border-gray-700">
+            <div class="flex justify-between items-center text-sm mb-1">
+                <span title="客观事实: 蜂巢核心必须维持在34-36°C">🌡️ 蜂巢内核心温度:</span> 
+                <span id="hive-temp" class="stat-val text-lg temp-good">35.0°C</span>
+            </div>
+            <div class="w-full bg-gray-700 h-1.5 rounded-full overflow-hidden flex">
+                <div class="bg-blue-400 h-full" style="width: 30%"></div>
+                <div class="bg-green-400 h-full" style="width: 40%"></div>
+                <div class="bg-red-400 h-full" style="width: 30%"></div>
+            </div>
+            <div class="flex justify-between text-[10px] text-gray-500 mt-1"><span><34°C(产热)</span><span>稳态平衡</span><span>>36°C(散热)</span></div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 text-xs md:text-sm">
+            <div class="bg-gray-800 p-1.5 rounded flex justify-between"><span>🐝 总数:</span> <span id="stat-total" class="stat-val text-yellow-500">0</span></div>
+            <div class="bg-gray-800 p-1.5 rounded flex justify-between"><span>🍯 储蜜:</span> <span id="stat-nectar" class="stat-val text-yellow-300">0</span></div>
+            <div class="bg-gray-800 p-1.5 rounded flex justify-between text-gray-400"><span title="寻找花源">侦查蜂:</span> <span id="stat-scout" class="stat-val">0</span></div>
+            <div class="bg-gray-800 p-1.5 rounded flex justify-between text-yellow-200"><span title="采集花蜜">采集蜂:</span> <span id="stat-forager" class="stat-val">0</span></div>
+            <div class="bg-gray-800 p-1.5 rounded flex justify-between text-red-400"><span title="震动飞行肌产热">加热蜂:</span> <span id="stat-heater" class="stat-val">0</span></div>
+            <div class="bg-gray-800 p-1.5 rounded flex justify-between text-blue-400"><span title="扇动翅膀散热">降温蜂:</span> <span id="stat-cooler" class="stat-val">0</span></div>
+        </div>
+        <div class="mt-2 text-right text-[10px] text-gray-500">FPS: <span id="stat-fps">60</span></div>
+    </div>
+
+    <div class="panel shadow-xl mt-2 md:mt-0">
+        <h2 class="text-sm md:text-lg font-bold text-orange-400 mb-2 border-b border-gray-600 pb-1">外部环境干预</h2>
+        
+        <div class="mb-4">
+            <div class="flex justify-between text-xs md:text-sm mb-1">
+                <span>外界气温 (External Temp):</span>
+                <span id="env-temp-display" class="font-bold text-orange-300">25.0 °C</span>
+            </div>
+            <input type="range" id="slider-env-temp" min="-10" max="55" step="1" value="25">
+            <div class="text-[10px] text-gray-400 leading-tight mt-1 bg-gray-900 p-1.5 rounded border border-gray-700">
+                <strong>生物学效应测试：</strong>拖动滑块制造极端天气，观察内勤工蜂如何通过生物物理手段（震翅产热/扇风散热）死守 35°C 蜂巢稳态。
+            </div>
+        </div>
+
+        <button id="btn-add-flower" class="w-full bg-pink-700 hover:bg-pink-600 text-white text-xs py-2.5 rounded transition font-bold shadow-lg">
+            🌸 随机生成一片新花海
+        </button>
+        <p class="text-[10px] text-gray-500 text-center mt-2">观察现象：侦查蜂发现花海后，回巢跳“8字舞”，将闲置蜂转化为采集蜂大军。</p>
+    </div>
+</div>
+
+<script>
+/**
+ * 严格基于客观物理与状态机逻辑的蜜蜂模拟
+ */
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+let width, height;
+let hive = { x: 0, y: 0, radius: 45, temp: 35.0, nectar: 0 };
+let flowers = [];
+let bees = [];
+
+// 模拟器参数
+const CONFIG = {
+    beeCount: window.innerWidth < 768 ? 300 : 600,
+    maxSpeed: 2.5,
+    hiveTargetTemp: 35.0, // 目标核心温度
+    tempExchangeRate: 0.005, // 蜂巢与外界热交换率
+    heatingPower: 0.015,  // 单只加热蜂产热功率
+    coolingPower: 0.02,   // 单只降温蜂散热功率
+};
+
+let Env = { temperature: 25.0 };
+let stats = { scout:0, forager:0, heater:0, cooler:0, fpsFrames:0, lastFpsTime:performance.now() };
+
+// DOM 元素
+const uiEnvTemp = document.getElementById('slider-env-temp');
+const valEnvTemp = document.getElementById('env-temp-display');
+const valHiveTemp = document.getElementById('hive-temp');
+
+uiEnvTemp.addEventListener('input', e => { 
+    Env.temperature = parseFloat(e.target.value); 
+    valEnvTemp.innerText = Env.temperature.toFixed(1) + ' °C'; 
+    valEnvTemp.style.color = Env.temperature > 35 ? '#fc8181' : (Env.temperature < 15 ? '#63b3ed' : '#fbd38d');
+});
+
+document.getElementById('btn-add-flower').addEventListener('click', spawnFlowerPatch);
+
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width; 
+    canvas.height = height;
+    hive.x = width / 2; 
+    hive.y = height / 2;
+}
+
+// 向量辅助
+class Vec2 {
+    constructor(x, y) { this.x = x; this.y = y; }
+    add(v) { this.x += v.x; this.y += v.y; return this; }
+    sub(v) { return new Vec2(this.x - v.x, this.y - v.y); }
+    mult(n) { this.x *= n; this.y *= n; return this; }
+    mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+    normalize() { let m = this.mag(); if(m!==0){this.x/=m; this.y/=m;} return this; }
+    static distSq(v1, v2) { return (v1.x-v2.x)**2 + (v1.y-v2.y)**2; }
+}
+
+function spawnFlowerPatch() {
+    let angle = Math.random() * Math.PI * 2;
+    let distance = Math.min(width, height)/2 * (0.4 + Math.random()*0.4);
+    flowers.push({
+        pos: new Vec2(hive.x + Math.cos(angle)*distance, hive.y + Math.sin(angle)*distance),
+        nectar: 3000,
+        radius: 30
+    });
+}
+
+/**
+ * 蜜蜂状态机 (FSM)
+ * IDLE: 在巢内待命
+ * HEATING: 巢内震翅产热 (宏观涌现)
+ * COOLING: 巢内扇风散热 (宏观涌现)
+ * SCOUTING: 随机游走寻找花朵
+ * DANCING: 在巢内跳8字舞传递矢量坐标
+ * FORAGING: 直飞目标花朵采蜜，满载返回
+ */
+class Bee {
+    constructor() {
+        this.pos = new Vec2(hive.x + (Math.random()-0.5)*20, hive.y + (Math.random()-0.5)*20);
+        this.vel = new Vec2((Math.random()-0.5)*2, (Math.random()-0.5)*2);
+        this.state = 'IDLE';
+        this.target = null; // 矢量通讯的目标坐标
+        this.nectarLoad = 0;
+        this.danceTimer = 0;
+        this.wanderAngle = Math.random() * Math.PI * 2;
+    }
+
+    update() {
+        let distToHiveSq = Vec2.distSq(this.pos, new Vec2(hive.x, hive.y));
+        let inHive = distToHiveSq < (hive.radius + 10)**2;
+
+        // --- 1. 热力学微气候调节逻辑 (物理稳态机制) ---
+        if (inHive && (this.state === 'IDLE' || this.state === 'HEATING' || this.state === 'COOLING')) {
+            // 降低速度，在蜂巢内爬行
+            this.vel.mult(0.8);
+            
+            if (hive.temp < 34.0) {
+                this.state = 'HEATING';
+                hive.temp += CONFIG.heatingPower; // 震翅产热方程
+                // 聚集向中心
+                let toCenter = new Vec2(hive.x, hive.y).sub(this.pos).normalize().mult(0.5);
+                this.vel.add(toCenter);
+            } else if (hive.temp > 36.0) {
+                this.state = 'COOLING';
+                hive.temp -= CONFIG.coolingPower; // 扇风蒸发降温方程
+                // 散开到蜂巢边缘
+                let fromCenter = this.pos.sub(new Vec2(hive.x, hive.y)).normalize().mult(0.5);
+                this.vel.add(fromCenter);
+            } else {
+                this.state = 'IDLE';
+                // 稳态时，有极小概率转为侦查蜂外出
+                if (Math.random() < 0.001) this.state = 'SCOUTING';
+            }
+        }
+
+        // --- 2. 矢量通讯与觅食逻辑 (Waggle Dance) ---
+        if (this.state === 'SCOUTING') {
+            // 随机探索 Boids 算法
+            this.wanderAngle += (Math.random() - 0.5) * 0.5;
+            let force = new Vec2(Math.cos(this.wanderAngle), Math.sin(this.wanderAngle)).mult(0.5);
+            this.vel.add(force).normalize().mult(CONFIG.maxSpeed);
+
+            // 发现花朵
+            for (let f of flowers) {
+                if (f.nectar > 0 && Vec2.distSq(this.pos, f.pos) < (f.radius + 50)**2) {
+                    this.target = new Vec2(f.pos.x, f.pos.y); // 记录矢量坐标
+                    this.state = 'FORAGING'; // 直接开始采摘
+                    break;
+                }
+            }
+        } 
+        else if (this.state === 'FORAGING') {
+            if (this.target) {
+                let distSq = Vec2.distSq(this.pos, this.target);
+                if (this.nectarLoad === 0) {
+                    // 飞向花朵
+                    let steer = this.target.sub(this.pos).normalize().mult(CONFIG.maxSpeed);
+                    this.vel = steer;
+                    // 到达花朵采蜜
+                    if (distSq < 400) {
+                        for (let i = 0; i < flowers.length; i++) {
+                            if (Vec2.distSq(flowers[i].pos, this.target) < 100) {
+                                flowers[i].nectar -= 5;
+                                this.nectarLoad = 5;
+                                if (flowers[i].nectar <= 0) flowers.splice(i, 1);
+                                break;
+                            }
+                        }
+                        if (this.nectarLoad === 0) this.target = null; // 花没了
+                    }
+                } else {
+                    // 飞回蜂巢
+                    let steer = new Vec2(hive.x, hive.y).sub(this.pos).normalize().mult(CONFIG.maxSpeed);
+                    this.vel = steer;
+                    // 到达蜂巢
+                    if (inHive) {
+                        hive.nectar += this.nectarLoad;
+                        this.nectarLoad = 0;
+                        this.state = 'DANCING'; // 开始跳8字舞传递情报
+                        this.danceTimer = 60; // 跳舞帧数
+                    }
+                }
+            } else {
+                this.state = 'IDLE'; // 目标丢失
+            }
+        }
+        else if (this.state === 'DANCING') {
+            this.vel.mult(0.5); // 缓慢移动
+            // 左右摇摆模拟 Waggle Dance
+            this.vel.add(new Vec2((Math.random()-0.5)*2, (Math.random()-0.5)*2));
+            this.danceTimer--;
+            
+            // 信息广播：如果有闲置蜂靠近，将其转化为前往该坐标的采集蜂
+            for (let other of bees) {
+                if ((other.state === 'IDLE' || other.state === 'HEATING' || other.state === 'COOLING') 
+                    && Vec2.distSq(this.pos, other.pos) < 400) {
+                    if (Math.random() < 0.1 && this.target) {
+                        other.state = 'FORAGING';
+                        other.target = new Vec2(this.target.x, this.target.y); // 复制坐标矢量
+                    }
+                }
+            }
+
+            if (this.danceTimer <= 0) {
+                this.state = this.target ? 'FORAGING' : 'IDLE'; // 跳完继续去采，或花没了休息
+            }
+        }
+
+        // 边界限制
+        let margin = 20;
+        if (this.pos.x < margin) this.vel.x += 0.5;
+        if (this.pos.x > width - margin) this.vel.x -= 0.5;
+        if (this.pos.y < margin) this.vel.y += 0.5;
+        if (this.pos.y > height - margin) this.vel.y -= 0.5;
+
+        // 应用位移
+        if(this.vel.mag() > CONFIG.maxSpeed) this.vel.normalize().mult(CONFIG.maxSpeed);
+        this.pos.add(this.vel);
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        ctx.rotate(Math.atan2(this.vel.y, this.vel.x));
+
+        // 根据生物学状态改变颜色
+        let color = '#ecc94b'; // 默认黄色
+        let size = 3;
+
+        if (this.state === 'HEATING') color = '#fc8181'; // 红色(高能耗产热)
+        else if (this.state === 'COOLING') color = '#63b3ed'; // 蓝色(高频扇风)
+        else if (this.state === 'SCOUTING') color = '#f6ad55'; // 橙色
+        else if (this.state === 'DANCING') { color = '#fbd38d'; size = 4; } // 亮黄粗大
+        else if (this.state === 'FORAGING' && this.nectarLoad > 0) size = 4; // 满载肚子变大
+
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, size+1, size-1, 0, 0, Math.PI*2); // 蜜蜂胶囊形状
+        ctx.fill();
+
+        // 黑色条纹
+        ctx.fillStyle = '#1a202c';
+        ctx.fillRect(-1, -size+1, 2, size*2-2);
+
+        // 翅膀 (如果是降温蜂，翅膀更大更透明表示高频扇动)
+        ctx.fillStyle = this.state === 'COOLING' ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.4)';
+        let wingSize = this.state === 'COOLING' ? size*1.5 : size;
+        ctx.beginPath(); ctx.ellipse(-1, -wingSize, size, wingSize, 0.3, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(-1, wingSize, size, wingSize, -0.3, 0, Math.PI*2); ctx.fill();
+
+        ctx.restore();
+    }
+}
+
+function init() {
+    window.addEventListener('resize', resize);
+    resize();
+    
+    // 初始化种群
+    for (let i = 0; i < CONFIG.beeCount; i++) bees.push(new Bee());
+    
+    // 初始环境
+    spawnFlowerPatch();
+    
+    requestAnimationFrame(loop);
+}
+
+function loop(timestamp) {
+    stats.fpsFrames++;
+    if (timestamp - stats.lastFpsTime >= 1000) {
+        document.getElementById('stat-fps').innerText = stats.fpsFrames;
+        stats.fpsFrames = 0; stats.lastFpsTime = timestamp;
+    }
+
+    ctx.fillStyle = '#2d3748';
+    ctx.fillRect(0, 0, width, height);
+
+    // 物理：环境温度导致蜂巢热量流失或增加 (牛顿冷却定律简易版)
+    hive.temp += (Env.temperature - hive.temp) * CONFIG.tempExchangeRate;
+
+    // 更新 UI 指示器
+    valHiveTemp.innerText = hive.temp.toFixed(1) + '°C';
+    if(hive.temp > 36) valHiveTemp.className = 'stat-val text-lg temp-hot';
+    else if(hive.temp < 34) valHiveTemp.className = 'stat-val text-lg temp-cold';
+    else valHiveTemp.className = 'stat-val text-lg temp-good';
+
+    // 绘制花朵 (资源)
+    for (let f of flowers) {
+        let size = (f.nectar / 3000) * f.radius;
+        // 花瓣
+        ctx.fillStyle = '#d53f8c'; 
+        for(let i=0; i<5; i++){
+            let a = i * Math.PI*2/5;
+            ctx.beginPath(); ctx.arc(f.pos.x + Math.cos(a)*size*0.6, f.pos.y + Math.sin(a)*size*0.6, size*0.5, 0, Math.PI*2); ctx.fill();
+        }
+        // 花蕊
+        ctx.fillStyle = '#ecc94b';
+        ctx.beginPath(); ctx.arc(f.pos.x, f.pos.y, size*0.4, 0, Math.PI*2); ctx.fill();
+    }
+
+    // 绘制蜂巢底层
+    ctx.fillStyle = '#975a16'; // 深金色
+    ctx.beginPath(); ctx.arc(hive.x, hive.y, hive.radius, 0, Math.PI*2); ctx.fill();
+    // 蜂窝六边形纹理暗示
+    ctx.strokeStyle = '#744210'; ctx.lineWidth = 2;
+    for(let i=0; i<6; i++) {
+        let a = i * Math.PI*2/6;
+        ctx.beginPath(); ctx.moveTo(hive.x, hive.y); ctx.lineTo(hive.x + Math.cos(a)*hive.radius, hive.y + Math.sin(a)*hive.radius); ctx.stroke();
+    }
+
+    // 更新蜂群并统计分类
+    stats.scout=0; stats.forager=0; stats.heater=0; stats.cooler=0;
+    for (let bee of bees) {
+        bee.update();
+        bee.draw(ctx);
+        
+        if (bee.state === 'SCOUTING') stats.scout++;
+        else if (bee.state === 'FORAGING' || bee.state === 'DANCING') stats.forager++;
+        else if (bee.state === 'HEATING') stats.heater++;
+        else if (bee.state === 'COOLING') stats.cooler++;
+    }
+
+    // 绘制蜂巢上层阴影 (增加立体感)
+    let grad = ctx.createRadialGradient(hive.x, hive.y, hive.radius*0.8, hive.x, hive.y, hive.radius*1.2);
+    grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, 'rgba(26,32,44,0.8)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(hive.x, hive.y, hive.radius*1.5, 0, Math.PI*2); ctx.fill();
+
+    // 更新 UI 数字
+    document.getElementById('stat-total').innerText = CONFIG.beeCount;
+    document.getElementById('stat-nectar').innerText = Math.floor(hive.nectar);
+    document.getElementById('stat-scout').innerText = stats.scout;
+    document.getElementById('stat-forager').innerText = stats.forager;
+    document.getElementById('stat-heater').innerText = stats.heater;
+    document.getElementById('stat-cooler').innerText = stats.cooler;
+
+    requestAnimationFrame(loop);
+}
+
+// 启动
+init();
+</script>
+</body>
+</html>
